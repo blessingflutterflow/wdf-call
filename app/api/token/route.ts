@@ -9,9 +9,17 @@ export async function POST(request: Request) {
     const AccessToken = twilio.jwt.AccessToken;
     const VoiceGrant = AccessToken.VoiceGrant;
 
+    // pushCredentialSid tells Twilio which FCM/APNs credential to use when
+    // waking the device for an incoming call. Without it, incoming calls
+    // never reach the app — registration succeeds, outbound calls work, but
+    // there's no way for Twilio to know how to push-notify this device.
+    // See TWILIO_PUSH_CREDENTIAL_SID_ANDROID in .env.local.example for setup.
+    const pushCredentialSid = process.env.TWILIO_PUSH_CREDENTIAL_SID_ANDROID;
+
     const voiceGrant = new VoiceGrant({
       outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID,
       incomingAllow: true,
+      ...(pushCredentialSid ? { pushCredentialSid } : {}),
     });
 
     const token = new AccessToken(

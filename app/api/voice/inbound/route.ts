@@ -1,13 +1,20 @@
 import { NextResponse } from 'next/server';
 import twilio from 'twilio';
 import { twilioClient } from '@/lib/twilio';
+import { findDidwwOwnerByNumber } from '@/lib/didww';
 
 // POST /api/voice/inbound
 // Twilio hits this when someone calls a user's WDF Call number. We route the
 // call to that user's app via <Dial><Client>uid</Client></Dial>.
 //
-// The owner uid is passed as ?owner= on the number's voiceUrl (set at claim
-// time); we fall back to resolving it from the dialed number's friendlyName.
+// Owner resolution, in order:
+//  1. ?owner= on the voiceUrl (only ever set for Twilio-native numbers,
+//     which had a per-number voiceUrl at claim time).
+//  2. Twilio IncomingPhoneNumber.friendlyName (Twilio-native numbers).
+//  3. DIDWW: all DIDWW numbers share ONE inbound trunk -> ONE voiceUrl (this
+//     route), so there's no per-number URL to embed an owner in. Instead
+//     the owner is tagged on the DID itself via `description` at claim
+//     time (see assignDidwwTrunkAndOwner()) and read back here.
 export async function POST(request: Request) {
   const twiml = new twilio.twiml.VoiceResponse();
   try {
@@ -24,6 +31,10 @@ export async function POST(request: Request) {
         limit: 1,
       });
       owner = list[0]?.friendlyName || null;
+    }
+
+    if (!owner && to) {
+      owner = await findDidwwOwnerByNumber(to.replace(/^\+/, ''));
     }
 
     if (owner) {

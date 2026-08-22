@@ -191,14 +191,61 @@ export async function getDidwwOrder(orderId: string) {
   return didwwFetch(`/orders/${orderId}`);
 }
 
-/** All DIDs currently owned by this account (paginated). */
+/** All DIDs currently owned by this account (paginated). Confirmed live
+ * attribute set (no separate "status" field, unlike the earlier guess this
+ * replaced — DID state is expressed via terminated/blocked/
+ * awaiting_registration). */
 export async function listDidwwDids(limit = 100) {
   const data = await didwwFetch(`/dids?page[size]=${limit}`);
   return (data.data || []).map((d: any) => ({
     id: d.id,
     number: d.attributes.number,
-    status: d.attributes.status,
+    description: d.attributes.description as string | null,
+    terminated: d.attributes.terminated,
+    blocked: d.attributes.blocked,
+    awaitingRegistration: d.attributes.awaiting_registration,
   }));
+}
+
+/**
+ * Finds the owner (Firebase uid) of a DIDWW number by looking up the DID's
+ * `description` field — the same "tag a provider resource instead of
+ * running our own database" pattern findNumberByIdentity()/friendlyName
+ * uses for Twilio-native numbers. Set at claim time via
+ * assignDidwwTrunkAndOwner(). Returns null if the number isn't found or
+ * has no owner tagged.
+ */
+export async function findDidwwOwnerByNumber(number: string): Promise<string | null> {
+  const data = await didwwFetch(`/dids?filter[number]=${encodeURIComponent(number)}&page[size]=1`);
+  const did = data.data?.[0];
+  return did?.attributes?.description || null;
+}
+
+/**
+ * Assigns a purchased DID to our shared inbound trunk (so it actually
+ * rings through to Twilio) and tags it with the owning user's Firebase
+ * uid via `description` (read back by findDidwwOwnerByNumber() in
+ * /api/voice/inbound). TODO: not yet live-tested — needs a real owned DID.
+ */
+export async function assignDidwwTrunkAndOwner(
+  didId: string,
+  voiceInTrunkId: string,
+  ownerUid: string
+) {
+  const data = await didwwFetch(`/dids/${didId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      data: {
+        id: didId,
+        type: 'dids',
+        attributes: { description: ownerUid },
+        relationships: {
+          voice_in_trunk: { data: { id: voiceInTrunkId, type: 'voice_in_trunks' } },
+        },
+      },
+    }),
+  });
+  return data.data;
 }
 
 // ── Identities & Addresses (KYC / registration) ─────────────────────────
@@ -400,40 +447,65 @@ export async function createDidwwProof(
   return data.data;
 }
 
-// ── Twilio bridge (trunk) ────────────────────────────────────────────────
+// ── Twilio bridge (BYOC) ─────────────────────────────────────────────────
 //
-// TODO: not yet live-tested — the account doesn't own a real DID yet to
-// attach a trunk to. Designed from DIDWW's documented Trunk resource
-// (POST /v3/trunks) and their Twilio BYOC integration guide. Plays the
-// same role createDidLogicSipAccount() + setDidLogicDestination() played
-// for DIDLogic: point this number's inbound calls at our Twilio SIP
-// domain. Verify field names once a real DID exists to test against.
+// One shared bridge serves ALL DIDWW numbers (unlike DIDLogic's
+// per-number Twilio SIP Domain — DIDWW's numbers all point at the same
+// trunk, and /api/voice/inbound resolves ownership from the dialed
+// number, same as it already does for Twilio-native numbers). All of the
+// following is confirmed live and already created for real:
+//
+// Twilio side (created via the Twilio Node SDK, not through this file —
+// see the one-time setup that produced these):
+//   IP ACL             AL6bf800c2af7320c2f17c932749995aed  (DIDWW's 7
+//                       signaling-source IPs, from doc.didww.com's
+//                       Inbound Trunks SIP Information page)
+//   SIP Domain         SD6b330b286a6330fb369b8c6214973413
+//                       wdf-didww.sip.twilio.com
+//   Connection Policy  NY36d10fc22911d6a322801d5778b65d36
+//     Target           NE496fabb9951af076d785d803b919868c -> sip:out.didww.com
+//   BYOC Trunk         BY995e0c57e360c0fbe5e80dd943d3da63
+//     voiceUrl -> https://wdf-call.vercel.app/api/voice/inbound
+//
+// DIDWW side: an *inbound* trunk (below) pointing at the Twilio SIP
+// domain above — this is what makes a call TO a DIDWW number ring
+// through to Twilio, then to our webhook. Note the resource name:
+// DIDWW's current API version (2026-04-16) uses `voice_in_trunks`, NOT
+// the `/v3/trunks` endpoint their older doc pages (dated 2017-2022)
+// describe — that endpoint 400s with "trunks are not supported in
+// 2026-04-16 DIDWW API version". Confirmed live: created a real trunk
+// (id e72244bf-acb8-428a-830b-6e345db5cf9d) with exactly this shape.
+//
+// TODO: the *outbound* side (a DIDWW trunk so calls FROM the app can
+// go out via DIDWW to a real phone) uses a separate `voice_out_trunks`
+// resource — confirmed to exist, but currently 403 "Access for Customer
+// is Denied" on this account. DIDWW gates outbound/origination behind
+// account approval (same pattern as available_dids and Local/
+// International Outbound Termination in general) — ask DIDWW to enable
+// it, the same way we asked for available_dids.
 
-export interface DidwwTrunkInput {
+export interface DidwwInboundTrunkInput {
   name: string;
-  /** Our Twilio SIP domain, e.g. wdf-did-<number>.sip.twilio.com */
+  /** Our Twilio SIP domain: wdf-didww.sip.twilio.com */
   host: string;
   port?: number;
 }
 
-export async function createDidwwTrunk(input: DidwwTrunkInput) {
-  const data = await didwwFetch('/trunks', {
+/** Confirmed live — see the module-level comment above for the exact
+ * resource name history (voice_in_trunks, not /v3/trunks). */
+export async function createDidwwInboundTrunk(input: DidwwInboundTrunkInput) {
+  const data = await didwwFetch('/voice_in_trunks', {
     method: 'POST',
     body: JSON.stringify({
       data: {
-        type: 'trunks',
+        type: 'voice_in_trunks',
         attributes: {
           name: input.name,
-          priority: 1,
-          weight: 65535,
-          ringing_timeout: 30,
-          cli_format: 'e164',
           configuration: {
             type: 'sip_configurations',
             attributes: {
               host: input.host,
               port: input.port ?? 5060,
-              transport_protocol_id: 2, // UDP
             },
           },
         },

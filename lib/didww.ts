@@ -214,30 +214,44 @@ export async function listDidwwDids(limit = 100) {
 // number, both trigger a fresh 24-48hr review.
 
 export interface DidwwIdentityInput {
+  /**
+   * 'personal' — one end-user, registered under their own ID. Needs only 1
+   * proof document (their Passport/National ID). This is the path for
+   * per-customer registration (each WDF Call user registers themselves).
+   *
+   * 'business' — a company identity (e.g. WDF's own, if ever reused across
+   * numbers). Needs 2 proof documents: an ID *and* a company incorporation
+   * certificate. Confirmed live: both share the same base required fields
+   * (first_name, last_name, phone_number); 'business' additionally
+   * requires company_name.
+   */
+  identityType: 'personal' | 'business';
   firstName: string;
   lastName: string;
   /** Digits only, no '+' — confirmed live (a leading '+' is rejected). */
   phoneNumber: string;
-  companyName: string;
+  /** Required when identityType is 'business'. */
+  companyName?: string;
   companyRegNumber?: string;
   contactEmail?: string;
 }
 
-/** Create a Business Identity. Confirmed live: required field set is
- * exactly first_name, last_name, phone_number, identity_type="business",
- * company_name. */
+/** Create an Identity (personal or business — see DidwwIdentityInput). */
 export async function createDidwwIdentity(input: DidwwIdentityInput) {
+  if (input.identityType === 'business' && !input.companyName) {
+    throw new Error('companyName is required for a business identity');
+  }
   const data = await didwwFetch('/identities', {
     method: 'POST',
     body: JSON.stringify({
       data: {
         type: 'identities',
         attributes: {
-          identity_type: 'business',
+          identity_type: input.identityType,
           first_name: input.firstName,
           last_name: input.lastName,
           phone_number: input.phoneNumber,
-          company_name: input.companyName,
+          ...(input.companyName ? { company_name: input.companyName } : {}),
           ...(input.companyRegNumber ? { company_reg_number: input.companyRegNumber } : {}),
           ...(input.contactEmail ? { contact_email: input.contactEmail } : {}),
         },
@@ -276,6 +290,109 @@ export async function createDidwwAddress(input: DidwwAddressInput) {
         relationships: {
           identity: { data: { type: 'identities', id: input.identityId } },
           country: { data: { type: 'countries', id: DIDWW_SOUTH_AFRICA_COUNTRY_ID } },
+        },
+      },
+    }),
+  });
+  return data.data;
+}
+
+// ── Documents (encrypted upload + proofs) ───────────────────────────────
+//
+// Confirmed live end-to-end (public keys fetched, fingerprint calculated,
+// a real document encrypted successfully) using DIDWW's own official
+// @didww/encrypt library rather than a hand-rolled implementation — this
+// touches real people's ID/address documents, not something to guess at.
+// The scheme (for reference, all handled by the library): AES-256-CBC
+// encrypts the file, then the AES key+IV is RSA-OAEP(4096-bit,SHA-256)
+// encrypted TWICE, once per DIDWW public key, and both ciphertexts are
+// concatenated with the AES output. Fingerprint = SHA-1 of each public
+// key, joined by ":::".
+//
+// Confirmed South African "Local" registration proof types (from the real
+// GET /v3/did_groups/{id}/address_requirement resource for Johannesburg —
+// same country-level rule, so presumed identical for the other 14 cities,
+// not individually re-checked):
+//   Personal identity needs 1 proof: [Passport | National ID]. This is
+//   the path for per-customer registration.
+//   Business identity needs 2 proofs: one of [Passport | National ID] +
+//   Business Registration/Incorporation Certificate.
+//   Address needs 1 proof (either path): a Utility Bill.
+export const DIDWW_SA_PROOF_TYPES = {
+  personalPassport: '3f20fc91-7d03-4c08-a453-b64f7ce4f788',
+  personalNationalId: '56647bfd-3755-4ed2-b043-858e9b07fb78',
+  businessPassport: '58b610c3-7cae-4437-bf52-02ad3ff0f947',
+  businessNationalId: '56217a19-309e-4334-bb6d-3788b958ef90',
+  businessIncorporationCertificate: '7af3a605-d124-4a39-be31-8bef2f39253d',
+  addressUtilityBill: 'd29b6637-36fe-477c-941c-19965a81e96c',
+} as const;
+
+let cachedEncryptor: any = null;
+async function getEncryptor() {
+  if (cachedEncryptor) return cachedEncryptor;
+  const { default: DidwwEncrypt } = await import('@didww/encrypt');
+  cachedEncryptor = new DidwwEncrypt({ environment: 'production' });
+  return cachedEncryptor;
+}
+
+/**
+ * Encrypts a document (ID scan, utility bill, etc.) with DIDWW's public
+ * keys and uploads it. Returns the encrypted_files id, which
+ * createDidwwProof() then attaches to an Identity or Address.
+ */
+export async function uploadDidwwDocument(
+  fileBuffer: ArrayBuffer,
+  description: string
+): Promise<string> {
+  const encryptor = await getEncryptor();
+  const fingerprint = await encryptor.getFingerprint();
+  const encrypted = await encryptor.encrypt(fileBuffer);
+  const encryptedBuffer: ArrayBuffer = encrypted.toArrayBuffer();
+
+  const form = new FormData();
+  form.append('encrypted_files[encryption_fingerprint]', fingerprint);
+  form.append('encrypted_files[items][][description]', description);
+  form.append(
+    'encrypted_files[items][][file]',
+    new Blob([encryptedBuffer], { type: 'application/octet-stream' }),
+    'file.enc'
+  );
+
+  const res = await fetch(`${DIDWW_BASE}/encrypted_files`, {
+    method: 'POST',
+    headers: { 'Api-Key': didwwKey(), Accept: 'application/json' },
+    body: form,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const detail = data?.errors?.base?.join?.('; ') || JSON.stringify(data?.errors);
+    throw new Error(detail || `DIDWW file upload failed (${res.status})`);
+  }
+  const id = data?.ids?.[0];
+  if (!id) throw new Error('DIDWW file upload returned no id');
+  return id;
+}
+
+/**
+ * Attaches one or more uploaded (encrypted_files) documents to an Identity
+ * or Address as a Proof of the given type — e.g. a Passport scan proving
+ * a Business Identity, or a utility bill proving an Address.
+ */
+export async function createDidwwProof(
+  entityType: 'identities' | 'addresses',
+  entityId: string,
+  proofTypeId: string,
+  encryptedFileIds: string[]
+) {
+  const data = await didwwFetch('/proofs', {
+    method: 'POST',
+    body: JSON.stringify({
+      data: {
+        type: 'proofs',
+        relationships: {
+          files: { data: encryptedFileIds.map((id) => ({ id, type: 'encrypted_files' })) },
+          proof_type: { data: { id: proofTypeId, type: 'proof_types' } },
+          entity: { data: { id: entityId, type: entityType } },
         },
       },
     }),

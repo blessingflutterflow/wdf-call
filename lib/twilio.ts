@@ -1,15 +1,21 @@
 import twilio from 'twilio';
 
 /**
- * REST client authenticated with the Twilio API key/secret — the same
- * credentials that already mint access tokens in /api/token. No Auth Token
- * needed.
+ * REST client for the wdf-call subset of Twilio's account.
+ *
+ * Uses Account SID + Auth Token. The API Key SID/Secret still live in the
+ * env and are used for JWT signing in /api/token (that's all a key is good
+ * for there), but the key pair provisioned for this deployment turned out
+ * NOT to authorize REST calls — every incomingPhoneNumbers/sip.domains call
+ * came back 401 "Authorization failed". The Auth Token does authorize them
+ * (verified directly against the live account), so REST goes through it.
+ * TODO: mint a dedicated standard API key for this deployment and switch
+ * back, so the Auth Token isn't in the env at all.
  */
 export function twilioClient() {
   return twilio(
-    process.env.TWILIO_API_KEY_SID!,
-    process.env.TWILIO_API_KEY_SECRET!,
-    { accountSid: process.env.TWILIO_ACCOUNT_SID! }
+    process.env.TWILIO_ACCOUNT_SID!,
+    process.env.TWILIO_AUTH_TOKEN!
   );
 }
 
@@ -31,18 +37,13 @@ export async function findNumberByIdentity(identity: string) {
 
 /**
  * Admin-level Twilio client for SIP Domain / IP Access Control List
- * management. Previously authenticated with Account SID + Auth Token, but
- * that's the classic account-wide credential shared with RingaMo and it was
- * found stale on this deployment (401 on every call). Standard API Keys
- * carry full account permissions same as the Auth Token — same as
- * [twilioClient] above — so this now uses that instead, removing the
- * dependency on the shared/stale credential entirely.
+ * management. Same credentials as [twilioClient] — Account SID + Auth Token
+ * (see the note there for why the API key pair isn't used for REST).
  */
 export function twilioAdminClient() {
   return twilio(
-    process.env.TWILIO_API_KEY_SID!,
-    process.env.TWILIO_API_KEY_SECRET!,
-    { accountSid: process.env.TWILIO_ACCOUNT_SID! }
+    process.env.TWILIO_ACCOUNT_SID!,
+    process.env.TWILIO_AUTH_TOKEN!
   );
 }
 

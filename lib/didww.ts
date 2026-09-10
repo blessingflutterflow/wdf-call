@@ -181,14 +181,27 @@ export async function orderDidwwNumbers(
   };
 }
 
-/**
- * Fetch an order's current status. TODO: confirm the exact shape of the
- * resulting DIDs once a real order clears (not yet testable without
- * funds) — likely either included here or via listDidwwDids() filtered by
- * order/created_at afterward.
- */
+/** Fetch an order's current status. */
 export async function getDidwwOrder(orderId: string) {
   return didwwFetch(`/orders/${orderId}`);
+}
+
+/**
+ * Resolves an order to the actual DID(s) it produced. Confirmed live: the
+ * DID appears immediately (dashboard purchase showed up as an
+ * `awaiting_registration` DID right away, and GET /v3/dids?filter[number]=
+ * returned it instantly) — no polling/delay needed in practice, but callers
+ * should still handle an empty result defensively.
+ */
+export async function getDidwwDidsByOrder(orderId: string) {
+  const data = await didwwFetch(`/dids?filter[order.id]=${orderId}`);
+  return (data.data || []).map((d: any) => ({
+    id: d.id,
+    number: d.attributes.number as string,
+    awaitingRegistration: d.attributes.awaiting_registration as boolean,
+    blocked: d.attributes.blocked as boolean,
+    expiresAt: d.attributes.expires_at as string | null,
+  }));
 }
 
 /** All DIDs currently owned by this account (paginated). Confirmed live
@@ -219,6 +232,21 @@ export async function findDidwwOwnerByNumber(number: string): Promise<string | n
   const data = await didwwFetch(`/dids?filter[number]=${encodeURIComponent(number)}&page[size]=1`);
   const did = data.data?.[0];
   return did?.attributes?.description || null;
+}
+
+/**
+ * Reverse of findDidwwOwnerByNumber() — finds a user's DIDWW number by
+ * their tagged uid, for the "what's my number" check on app open. Confirmed
+ * live: `filter[description]=` works on /v3/dids (tested by tagging then
+ * querying the real Bloemfontein test DID, then resetting it back to null).
+ * Returns null if this uid has no DIDWW number (yet, or ever).
+ */
+export async function findDidwwNumberByOwner(ownerUid: string): Promise<string | null> {
+  const data = await didwwFetch(
+    `/dids?filter[description]=${encodeURIComponent(ownerUid)}&page[size]=1`
+  );
+  const did = data.data?.[0];
+  return did?.attributes?.number ? `+${did.attributes.number}` : null;
 }
 
 /**
@@ -386,6 +414,17 @@ async function getEncryptor() {
  * Encrypts a document (ID scan, utility bill, etc.) with DIDWW's public
  * keys and uploads it. Returns the encrypted_files id, which
  * createDidwwProof() then attaches to an Identity or Address.
+ *
+ * ⚠️ CORRECTED 22 Aug 2026 — the shape below is confirmed live via
+ * validation-error probing; the previous version (`encrypted_files[items][]
+ * [file]`, an array wrapper, mirroring the old docs example) failed every
+ * real submission with an opaque "invalid params" and was silently eating
+ * every KYC attempt since this function was written — nobody's registration
+ * ever got past the ID-document upload. The real request is FLAT, no
+ * `items[]` array: `encrypted_files[file]` + `encrypted_files
+ * [encryption_fingerprint]` + `encrypted_files[description]`. The response
+ * is also JSON:API-shaped (`{data: {id, type, attributes}}`), not the
+ * `{ids: [...]}` legacy shape this function used to expect.
  */
 export async function uploadDidwwDocument(
   fileBuffer: ArrayBuffer,
@@ -398,9 +437,9 @@ export async function uploadDidwwDocument(
 
   const form = new FormData();
   form.append('encrypted_files[encryption_fingerprint]', fingerprint);
-  form.append('encrypted_files[items][][description]', description);
+  form.append('encrypted_files[description]', description);
   form.append(
-    'encrypted_files[items][][file]',
+    'encrypted_files[file]',
     new Blob([encryptedBuffer], { type: 'application/octet-stream' }),
     'file.enc'
   );
@@ -412,10 +451,12 @@ export async function uploadDidwwDocument(
   });
   const data = await res.json();
   if (!res.ok) {
-    const detail = data?.errors?.base?.join?.('; ') || JSON.stringify(data?.errors);
+    const detail = Array.isArray(data?.errors)
+      ? data.errors.map((e: any) => e.detail || e.title).join('; ')
+      : undefined;
     throw new Error(detail || `DIDWW file upload failed (${res.status})`);
   }
-  const id = data?.ids?.[0];
+  const id = data?.data?.id;
   if (!id) throw new Error('DIDWW file upload returned no id');
   return id;
 }
@@ -440,6 +481,45 @@ export async function createDidwwProof(
           files: { data: encryptedFileIds.map((id) => ({ id, type: 'encrypted_files' })) },
           proof_type: { data: { id: proofTypeId, type: 'proof_types' } },
           entity: { data: { id: entityId, type: entityType } },
+        },
+      },
+    }),
+  });
+  return data.data;
+}
+
+/**
+ * The step that actually ties one or more purchased DIDs to a verified
+ * Address (which already carries its own Identity relationship from
+ * createDidwwAddress()). The doc example at
+ * doc.didww.com/api3/examples/buy-dids-with-verification.html shows this
+ * taking `identity` + `address` + `did` (singular) — that's stale for the
+ * current API version. Confirmed live by validation-error probing (fake
+ * UUIDs moved from "Param not allowed" (400) to "is invalid" (422) only
+ * for these two fields): the real shape is `address` (singular) + `dids`
+ * (plural array) — one verified address can cover multiple DIDs in the
+ * same city at once, matching DIDWW's "reuse the identity across numbers
+ * in that city" rule.
+ *
+ * Until this is created, a DID sits `awaiting_registration: true` with no
+ * identity attached (e.g. the dashboard-purchased Bloemfontein number,
+ * blocked+unregistered until this is called for it). Submitting this is
+ * what kicks off DIDWW's human review; once approved,
+ * `awaiting_registration` flips to false and the number goes live on
+ * whatever trunk it's assigned to.
+ */
+export async function createDidwwAddressVerification(
+  addressId: string,
+  didIds: string[]
+) {
+  const data = await didwwFetch('/address_verifications', {
+    method: 'POST',
+    body: JSON.stringify({
+      data: {
+        type: 'address_verifications',
+        relationships: {
+          address: { data: { id: addressId, type: 'addresses' } },
+          dids: { data: didIds.map((id) => ({ id, type: 'dids' })) },
         },
       },
     }),

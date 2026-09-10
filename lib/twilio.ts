@@ -30,12 +30,20 @@ export async function findNumberByIdentity(identity: string) {
 }
 
 /**
- * Admin-level Twilio client (Account SID + Auth Token) — SIP Domain / IP
- * Access Control List management needs broader permissions than the API Key
- * used elsewhere for minting Voice access tokens.
+ * Admin-level Twilio client for SIP Domain / IP Access Control List
+ * management. Previously authenticated with Account SID + Auth Token, but
+ * that's the classic account-wide credential shared with RingaMo and it was
+ * found stale on this deployment (401 on every call). Standard API Keys
+ * carry full account permissions same as the Auth Token — same as
+ * [twilioClient] above — so this now uses that instead, removing the
+ * dependency on the shared/stale credential entirely.
  */
 export function twilioAdminClient() {
-  return twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!);
+  return twilio(
+    process.env.TWILIO_API_KEY_SID!,
+    process.env.TWILIO_API_KEY_SECRET!,
+    { accountSid: process.env.TWILIO_ACCOUNT_SID! }
+  );
 }
 
 /**

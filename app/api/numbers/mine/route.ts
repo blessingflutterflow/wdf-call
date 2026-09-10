@@ -4,13 +4,18 @@ import {
   findDidLogicDomainByIdentity,
   didLogicNumberFromDomain,
 } from '@/lib/twilio';
+import { findDidwwNumberByOwner } from '@/lib/didww';
 
 // POST /api/numbers/mine
 // Body: { identity: string }
 // Returns: { phoneNumber: string | null }
 //
-// Checks native Twilio numbers first (Mobile), then falls back to a
-// DIDLogic-bridged number (Landline) — a user has at most one of either.
+// Checks native Twilio numbers first (Mobile), then a DIDLogic-bridged
+// number, then a DIDWW-bridged number — a user has at most one number
+// across all three. DIDWW numbers show up here as soon as they're
+// purchased+tagged (register/route.ts does this at submit time), even
+// while still `awaiting_registration` on DIDWW's side — matches the app's
+// success screen, which shows the number immediately as "yours, pending".
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -29,10 +34,13 @@ export async function POST(request: Request) {
     }
 
     const domain = await findDidLogicDomainByIdentity(identity);
-    const didNumber = domain ? didLogicNumberFromDomain(domain.domainName) : null;
-    return NextResponse.json({
-      phoneNumber: didNumber ? `+${didNumber}` : null,
-    });
+    const didLogicNumber = domain ? didLogicNumberFromDomain(domain.domainName) : null;
+    if (didLogicNumber) {
+      return NextResponse.json({ phoneNumber: `+${didLogicNumber}` });
+    }
+
+    const didwwNumber = await findDidwwNumberByOwner(identity);
+    return NextResponse.json({ phoneNumber: didwwNumber });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[/api/numbers/mine] Error:', message);

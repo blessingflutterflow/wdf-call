@@ -28,19 +28,40 @@ export async function POST(request: Request) {
       );
     }
 
+    // Native Twilio is the primary source and stays strict — if this call
+    // fails, that's a real problem worth surfacing.
     const existing = await findNumberByIdentity(identity);
     if (existing) {
       return NextResponse.json({ phoneNumber: existing.phoneNumber });
     }
 
-    const domain = await findDidLogicDomainByIdentity(identity);
-    const didLogicNumber = domain ? didLogicNumberFromDomain(domain.domainName) : null;
-    if (didLogicNumber) {
-      return NextResponse.json({ phoneNumber: `+${didLogicNumber}` });
+    // DIDLogic and DIDWW are optional side-providers, each with its own
+    // account and credentials. A broken/unapproved side-provider account
+    // (e.g. an expired DIDWW Api-Key → "Authorization failed") must NOT take
+    // down this whole endpoint and lock every user out of the dialer — it
+    // just means "no number from that source". Logged, not thrown.
+    try {
+      const domain = await findDidLogicDomainByIdentity(identity);
+      const didLogicNumber = domain
+        ? didLogicNumberFromDomain(domain.domainName)
+        : null;
+      if (didLogicNumber) {
+        return NextResponse.json({ phoneNumber: `+${didLogicNumber}` });
+      }
+    } catch (e) {
+      console.warn('[/api/numbers/mine] DIDLogic lookup skipped:', e);
     }
 
-    const didwwNumber = await findDidwwNumberByOwner(identity);
-    return NextResponse.json({ phoneNumber: didwwNumber });
+    try {
+      const didwwNumber = await findDidwwNumberByOwner(identity);
+      if (didwwNumber) {
+        return NextResponse.json({ phoneNumber: didwwNumber });
+      }
+    } catch (e) {
+      console.warn('[/api/numbers/mine] DIDWW lookup skipped:', e);
+    }
+
+    return NextResponse.json({ phoneNumber: null });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[/api/numbers/mine] Error:', message);

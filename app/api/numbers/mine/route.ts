@@ -5,17 +5,19 @@ import {
   didLogicNumberFromDomain,
 } from '@/lib/twilio';
 import { findDidwwNumberByOwner } from '@/lib/didww';
+import { getClaim } from '@/lib/claimStore';
 
 // POST /api/numbers/mine
 // Body: { identity: string }
-// Returns: { phoneNumber: string | null }
+// Returns: { phoneNumber: string | null, status: "approved"|"pending"|"rejected"|"failed"|"none",
+//            requestedNumber?: string, error?: string }
 //
 // Checks native Twilio numbers first (Mobile), then a DIDLogic-bridged
 // number, then a DIDWW-bridged number — a user has at most one number
-// across all three. DIDWW numbers show up here as soon as they're
-// purchased+tagged (register/route.ts does this at submit time), even
-// while still `awaiting_registration` on DIDWW's side — matches the app's
-// success screen, which shows the number immediately as "yours, pending".
+// across all three. If none of those own a number yet, falls back to their
+// claim-request status (pending manual payment approval — see
+// lib/claimStore.ts) so the app can show "waiting for approval" instead of
+// a bare "no number".
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -32,7 +34,7 @@ export async function POST(request: Request) {
     // fails, that's a real problem worth surfacing.
     const existing = await findNumberByIdentity(identity);
     if (existing) {
-      return NextResponse.json({ phoneNumber: existing.phoneNumber });
+      return NextResponse.json({ phoneNumber: existing.phoneNumber, status: 'approved' });
     }
 
     // DIDLogic and DIDWW are optional side-providers, each with its own
@@ -46,7 +48,7 @@ export async function POST(request: Request) {
         ? didLogicNumberFromDomain(domain.domainName)
         : null;
       if (didLogicNumber) {
-        return NextResponse.json({ phoneNumber: `+${didLogicNumber}` });
+        return NextResponse.json({ phoneNumber: `+${didLogicNumber}`, status: 'approved' });
       }
     } catch (e) {
       console.warn('[/api/numbers/mine] DIDLogic lookup skipped:', e);
@@ -55,13 +57,28 @@ export async function POST(request: Request) {
     try {
       const didwwNumber = await findDidwwNumberByOwner(identity);
       if (didwwNumber) {
-        return NextResponse.json({ phoneNumber: didwwNumber });
+        return NextResponse.json({ phoneNumber: didwwNumber, status: 'approved' });
       }
     } catch (e) {
       console.warn('[/api/numbers/mine] DIDWW lookup skipped:', e);
     }
 
-    return NextResponse.json({ phoneNumber: null });
+    // No purchased number anywhere — report the claim-request status instead.
+    try {
+      const claim = await getClaim(identity);
+      if (claim) {
+        return NextResponse.json({
+          phoneNumber: null,
+          status: claim.status, // 'pending' | 'rejected' | 'failed'
+          requestedNumber: claim.phoneNumber,
+          ...(claim.error ? { error: claim.error } : {}),
+        });
+      }
+    } catch (e) {
+      console.warn('[/api/numbers/mine] claim lookup skipped:', e);
+    }
+
+    return NextResponse.json({ phoneNumber: null, status: 'none' });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[/api/numbers/mine] Error:', message);

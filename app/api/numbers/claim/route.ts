@@ -1,20 +1,25 @@
 import { NextResponse } from 'next/server';
-import { twilioClient, findNumberByIdentity } from '@/lib/twilio';
+import { findNumberByIdentity } from '@/lib/twilio';
+import { getClaim, setClaim, type ClaimRecord } from '@/lib/claimStore';
 
 // POST /api/numbers/claim
-// Body: { identity: string, phoneNumber: string, country?: string,
-//         numberType?: "mobile"|"local" }
-// Returns: { phoneNumber, sid, reused? }
+// Body: { identity, phoneNumber, numberType?: "mobile"|"local", fcmToken? }
+// Returns: { status: "pending"|"approved", phoneNumber: string|null }
 //
-// Purchases the chosen number, tags it with the owner (friendlyName = uid),
-// and points its inbound voice webhook at /api/voice/inbound so calls ring
-// the owner's app. Idempotent: a user who already has a number gets it back.
+// Payment is manual (EFT, checked by a human) — there's no payment gateway,
+// so this does NOT purchase the number. It records a request for an admin to
+// approve once proof of payment is in and the Twilio balance is topped up
+// (see /admin and /api/admin/claims/[uid]/approve, which does the actual
+// purchase). Idempotent: a user who already owns a number gets it back
+// immediately; a user with an existing pending request gets that back
+// instead of filing a second one.
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
     const identity = body.identity as string | undefined;
     const phoneNumber = body.phoneNumber as string | undefined;
     const numberType = body.numberType === 'local' ? 'local' : 'mobile';
+    const fcmToken = body.fcmToken as string | undefined;
 
     if (!identity || !phoneNumber) {
       return NextResponse.json(
@@ -23,61 +28,50 @@ export async function POST(request: Request) {
       );
     }
 
-    const client = twilioClient();
-
-    // One number per user — return the existing one instead of buying again.
+    // Already owns a number (paid + approved earlier) — return it, no new
+    // request needed.
     const existing = await findNumberByIdentity(identity);
     if (existing) {
       return NextResponse.json({
+        status: 'approved',
         phoneNumber: existing.phoneNumber,
         sid: existing.sid,
         reused: true,
       });
     }
 
-    // Inbound webhook carries the owner so routing needs no DB lookup.
-    const origin = process.env.PUBLIC_BASE_URL || new URL(request.url).origin;
-    const voiceUrl = `${origin}/api/voice/inbound?owner=${encodeURIComponent(identity)}`;
+    // Already has a request in flight — don't file a duplicate one, just
+    // report where it stands (this also covers a 'rejected'/'failed' retry:
+    // filing a fresh request for the same or a different number is fine).
+    const current = await getClaim(identity);
+    if (current && current.status === 'pending') {
+      return NextResponse.json({
+        status: 'pending',
+        phoneNumber: null,
+        requestedNumber: current.phoneNumber,
+      });
+    }
 
-    // Regulated countries (e.g. ZA) require an approved bundle + address, and
-    // the regulation type has to MATCH the number.
-    //
-    // ⚠️ ZA quirk: the numbers Twilio returns under AvailablePhoneNumbers/ZA/
-    // Local are the 087 range, which in South Africa's numbering plan is the
-    // *National* non-geographic range — Twilio rejects them against a "Local -
-    // Business" bundle ("bundle type does not have correct regulation to
-    // provision this number") and needs the "National - Business" one. So the
-    // app's "Landline" tab (numberType 'local') maps to the NATIONAL bundle
-    // here. TWILIO_BUNDLE_SID_LOCAL is kept as a fallback for the day Twilio
-    // actually stocks geographic ZA locals.
-    const bundleSid =
-      (numberType === 'local'
-        ? process.env.TWILIO_BUNDLE_SID_NATIONAL ||
-          process.env.TWILIO_BUNDLE_SID_LOCAL
-        : process.env.TWILIO_BUNDLE_SID) || undefined;
-    const addressSid =
-      (numberType === 'local'
-        ? process.env.TWILIO_ADDRESS_SID_NATIONAL ||
-          process.env.TWILIO_ADDRESS_SID_LOCAL
-        : process.env.TWILIO_ADDRESS_SID) || undefined;
-
-    const purchased = await client.incomingPhoneNumbers.create({
+    const now = Date.now();
+    const claim: ClaimRecord = {
+      identity,
       phoneNumber,
-      friendlyName: identity, // ← owner stored here
-      voiceUrl,
-      voiceMethod: 'POST',
-      ...(bundleSid ? { bundleSid } : {}),
-      ...(addressSid ? { addressSid } : {}),
-    });
+      numberType,
+      status: 'pending',
+      requestedAt: now,
+      updatedAt: now,
+      ...(fcmToken ? { fcmToken } : {}),
+    };
+    await setClaim(identity, claim);
 
     return NextResponse.json({
-      phoneNumber: purchased.phoneNumber,
-      sid: purchased.sid,
+      status: 'pending',
+      phoneNumber: null,
+      requestedNumber: phoneNumber,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[/api/numbers/claim] Error:', message);
-    // 400 so the app can show Twilio's reason (taken, regulatory bundle, etc.)
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

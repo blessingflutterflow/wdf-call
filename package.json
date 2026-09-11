@@ -12,6 +12,7 @@
     "@didww/encrypt": "^1.5.3",
     "@twilio/voice-sdk": "^2.18.0",
     "firebase": "^12.10.0",
+    "firebase-admin": "^14.4.0",
     "next": "16.3.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { isAuthorizedAdmin } from '@/lib/adminAuth';
 import { getClaim, setClaim } from '@/lib/claimStore';
 import { purchaseNumberForIdentity } from '@/lib/purchase';
-import { adminMessaging } from '@/lib/firebaseAdmin';
+import { sendPushNotification } from '@/lib/push';
 
 // POST /api/admin/claims/[uid]/approve
 // Header: x-admin-code
@@ -63,13 +63,11 @@ export async function POST(
     // let a push failure undo the approval that already happened above.
     if (claim.fcmToken) {
       try {
-        await adminMessaging().send({
-          token: claim.fcmToken,
-          notification: {
-            title: 'Your WDF Call number is ready',
-            body: `${purchased.phoneNumber} is live — you can call and receive calls now.`,
-          },
-        });
+        await sendPushNotification(
+          claim.fcmToken,
+          'Your WDF Call number is ready',
+          `${purchased.phoneNumber} is live — you can call and receive calls now.`
+        );
       } catch (err) {
         console.warn('[/api/admin/claims/approve] push notification failed:', err);
       }

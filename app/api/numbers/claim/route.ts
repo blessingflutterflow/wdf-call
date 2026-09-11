@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { findNumberByIdentity } from '@/lib/twilio';
-import { getClaim, setClaim, type ClaimRecord } from '@/lib/claimStore';
+import { getClaim, setClaim, OPEN_STATUSES, type ClaimRecord } from '@/lib/claimStore';
 
 // POST /api/numbers/claim
 // Body: { identity, phoneNumber, numberType?: "mobile"|"local", fcmToken? }
@@ -44,11 +44,12 @@ export async function POST(request: Request) {
     // report where it stands (this also covers a 'rejected'/'failed' retry:
     // filing a fresh request for the same or a different number is fine).
     const current = await getClaim(identity);
-    if (current && current.status === 'pending') {
+    if (current && OPEN_STATUSES.includes(current.status)) {
       return NextResponse.json({
-        status: 'pending',
+        status: current.status,
         phoneNumber: null,
         requestedNumber: current.phoneNumber,
+        hasProof: !!current.proofPath,
       });
     }
 
@@ -68,6 +69,7 @@ export async function POST(request: Request) {
       status: 'pending',
       phoneNumber: null,
       requestedNumber: phoneNumber,
+      hasProof: false,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';

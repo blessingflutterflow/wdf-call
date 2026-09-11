@@ -69,9 +69,11 @@ export async function POST(request: Request) {
       if (claim) {
         return NextResponse.json({
           phoneNumber: null,
-          status: claim.status, // 'pending' | 'rejected' | 'failed'
+          status: claim.status, // 'pending' | 'seen' | 'processing' | 'rejected' | 'failed'
           requestedNumber: claim.phoneNumber,
+          hasProof: !!claim.proofPath,
           ...(claim.error ? { error: claim.error } : {}),
+          ...(claim.rejectReason ? { rejectReason: claim.rejectReason } : {}),
         });
       }
     } catch (e) {

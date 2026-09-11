@@ -18,7 +18,20 @@ import { getGoogleAccessToken, projectId } from '@/lib/googleAuth';
  * SDK) — see lib/googleAuth.ts for why: firebase-admin's Auth module pulls
  * in a dependency chain Vercel's bundler can't load at all.
  */
-export type ClaimStatus = 'pending' | 'approved' | 'rejected' | 'failed';
+/**
+ * pending     -> request filed, proof of payment not confirmed yet
+ * seen        -> admin has looked at the proof of payment
+ * processing  -> admin is topping up the Twilio balance to cover it
+ * approved    -> number purchased, live
+ * rejected    -> declined, no charge
+ * failed      -> approval was attempted but the Twilio purchase itself failed
+ *                (e.g. number taken in the meantime)
+ */
+export type ClaimStatus = 'pending' | 'seen' | 'processing' | 'approved' | 'rejected' | 'failed';
+
+// Every status that still needs admin action — used both to decide what the
+// requester's app keeps polling for, and what shows up in the admin queue.
+export const OPEN_STATUSES: ClaimStatus[] = ['pending', 'seen', 'processing'];
 
 export interface ClaimRecord {
   identity: string;
@@ -27,9 +40,12 @@ export interface ClaimRecord {
   status: ClaimStatus;
   requestedAt: number; // epoch ms
   updatedAt: number;
-  fcmToken?: string; // for the "your number is ready" push, best-effort
+  fcmToken?: string; // for status-change pushes, best-effort
   twilioSid?: string; // set once approved
   error?: string; // set if approval failed (e.g. number no longer available)
+  rejectReason?: string; // set if rejected, shown to the requester
+  proofPath?: string; // storage object path, set once proof of payment is uploaded
+  proofUploadedAt?: number;
 }
 
 const IDENTITY_TOOLKIT = 'https://identitytoolkit.googleapis.com/v1';
@@ -98,16 +114,16 @@ export async function setClaim(identity: string, claim: ClaimRecord): Promise<vo
 }
 
 /**
- * Every pending claim across all users. Identity Toolkit has no "query by
- * custom claim" — so this pages through the full user list and filters
- * server-side. Fine for WDF Call's user count; would need a real database
- * well before this becomes a problem.
+ * Every open claim (pending/seen/processing) across all users. Identity
+ * Toolkit has no "query by custom claim" — so this pages through the full
+ * user list and filters server-side. Fine for WDF Call's user count; would
+ * need a real database well before this becomes a problem.
  */
-export async function listPendingClaims(): Promise<
+export async function listOpenClaims(): Promise<
   (ClaimRecord & { uid: string; email?: string })[]
 > {
   const accessToken = await getGoogleAccessToken(SCOPES);
-  const pending: (ClaimRecord & { uid: string; email?: string })[] = [];
+  const open: (ClaimRecord & { uid: string; email?: string })[] = [];
   let nextPageToken: string | undefined;
 
   do {
@@ -125,13 +141,13 @@ export async function listPendingClaims(): Promise<
 
     for (const user of data.users ?? []) {
       const claim = parseClaim(user);
-      if (claim && claim.status === 'pending') {
-        pending.push({ ...claim, uid: user.localId, email: user.email });
+      if (claim && OPEN_STATUSES.includes(claim.status)) {
+        open.push({ ...claim, uid: user.localId, email: user.email });
       }
     }
     nextPageToken = data.nextPageToken;
   } while (nextPageToken);
 
-  pending.sort((a, b) => a.requestedAt - b.requestedAt);
-  return pending;
+  open.sort((a, b) => a.requestedAt - b.requestedAt);
+  return open;
 }

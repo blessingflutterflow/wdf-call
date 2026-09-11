@@ -1,52 +1,78 @@
-import { getGoogleAccessToken } from '@/lib/googleAuth';
+import { getGoogleAccessToken, projectId } from '@/lib/googleAuth';
 
 /**
  * Global app settings (currently just the bank details shown to someone
  * paying for a number) — admin-editable, not per-user, so it doesn't fit
- * claimStore's per-user-custom-claims trick. Stored as one small JSON object
- * in the Firebase Storage bucket every Firebase project already has (same
- * bucket as NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET), via the GCS JSON API with
- * the same hand-rolled service-account auth as claimStore/push — see
- * lib/googleAuth.ts for why not the SDK.
+ * claimStore's "one claim per requesting user" shape directly. Rather than
+ * provision real infra for one small text blob under a deadline (Cloud
+ * Storage's bucket for this project turned out not to actually exist —
+ * NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET is set but Storage was never turned
+ * on), this reuses the exact same trick claimStore.ts already proved out:
+ * stash it in a real Firebase Auth user's custom claims via the Identity
+ * Toolkit REST API, just under a different key (`wdfAppSettings`) so it
+ * doesn't collide with that user's own claim if they ever have one.
+ *
+ * SETTINGS_ANCHOR_UID is an arbitrary, already-existing, never-deleted
+ * account used purely as a place to hang this global blob — it has nothing
+ * to do with who that account actually belongs to.
  */
-const BUCKET = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET!;
-const SETTINGS_OBJECT = 'settings/app-settings.json';
-const SCOPES = ['https://www.googleapis.com/auth/devstorage.read_write'];
+const SETTINGS_ANCHOR_UID = 'aMuMvctjGcTUOEJsG6OTVfPPqoy1';
+
+const IDENTITY_TOOLKIT = 'https://identitytoolkit.googleapis.com/v1';
+const SCOPES = ['https://www.googleapis.com/auth/identitytoolkit'];
 
 export interface AppSettings {
-  bankDetails: string; // free-text — bank, account name/number, branch code, reference format
+  bankDetails: string;
   updatedAt: number;
 }
 
 const DEFAULT_SETTINGS: AppSettings = { bankDetails: '', updatedAt: 0 };
 
-export async function getAppSettings(): Promise<AppSettings> {
+async function identityToolkitFetch(path: string, body: unknown) {
   const accessToken = await getGoogleAccessToken(SCOPES);
-  const res = await fetch(
-    `https://storage.googleapis.com/storage/v1/b/${BUCKET}/o/${encodeURIComponent(SETTINGS_OBJECT)}?alt=media`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  if (res.status === 404) return DEFAULT_SETTINGS;
+  const res = await fetch(`${IDENTITY_TOOLKIT}/projects/${projectId()}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) {
-    throw new Error(`Could not read settings (${res.status}): ${await res.text()}`);
+    throw new Error(`Identity Toolkit request failed (${res.status}): ${await res.text()}`);
   }
-  return (await res.json()) as AppSettings;
+  return res.json();
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  const data = await identityToolkitFetch('/accounts:lookup', {
+    localId: [SETTINGS_ANCHOR_UID],
+  });
+  const user = data.users?.[0] as { customAttributes?: string } | undefined;
+  if (!user?.customAttributes) return DEFAULT_SETTINGS;
+  try {
+    const attrs = JSON.parse(user.customAttributes);
+    return (attrs?.wdfAppSettings as AppSettings | undefined) ?? DEFAULT_SETTINGS;
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
 }
 
 export async function setAppSettings(settings: AppSettings): Promise<void> {
-  const accessToken = await getGoogleAccessToken(SCOPES);
-  const res = await fetch(
-    `https://storage.googleapis.com/upload/storage/v1/b/${BUCKET}/o?uploadType=media&name=${encodeURIComponent(SETTINGS_OBJECT)}`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(settings),
+  const data = await identityToolkitFetch('/accounts:lookup', {
+    localId: [SETTINGS_ANCHOR_UID],
+  });
+  const user = data.users?.[0] as { customAttributes?: string } | undefined;
+  let existing: Record<string, unknown> = {};
+  if (user?.customAttributes) {
+    try {
+      existing = JSON.parse(user.customAttributes);
+    } catch {
+      existing = {};
     }
-  );
-  if (!res.ok) {
-    throw new Error(`Could not save settings (${res.status}): ${await res.text()}`);
   }
+  await identityToolkitFetch('/accounts:update', {
+    localId: SETTINGS_ANCHOR_UID,
+    customAttributes: JSON.stringify({ ...existing, wdfAppSettings: settings }),
+  });
 }

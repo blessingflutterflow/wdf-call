@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { isAuthorizedAdmin } from '@/lib/adminAuth';
-import { getAppSettings, setAppSettings } from '@/lib/settingsStore';
+import { getAppSettings, setAppSettings, DEFAULT_MAX_CALL_MINUTES } from '@/lib/settingsStore';
 
 // GET/POST /api/admin/settings/call-limit
 // Header: x-admin-code
@@ -14,7 +14,7 @@ export async function GET(request: Request) {
   }
   try {
     const settings = await getAppSettings();
-    return NextResponse.json({ maxCallMinutes: settings.maxCallMinutes ?? 5 });
+    return NextResponse.json({ maxCallMinutes: settings.maxCallMinutes ?? DEFAULT_MAX_CALL_MINUTES });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[/api/admin/settings/call-limit] Error:', message);

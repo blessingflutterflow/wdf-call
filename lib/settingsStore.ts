@@ -25,10 +25,20 @@ export interface AppSettings {
   bankDetails: string;
   // Auto-hangs up any call past this many minutes (Twilio's own <Dial
   // timeLimit>, not a monitoring loop this backend has to run) — the "stop
-  // it costing money past N minutes" control. Admin-editable; 0/undefined
-  // means no limit.
+  // it costing money past N minutes" control. Admin-editable; unset defaults
+  // to DEFAULT_MAX_CALL_MINUTES, 0 means no limit. Use resolveMaxCallMinutes()
+  // rather than reading this field directly so callers don't have to
+  // re-derive that default/zero distinction themselves.
   maxCallMinutes?: number;
   updatedAt: number;
+}
+
+export const DEFAULT_MAX_CALL_MINUTES = 5;
+
+// Seconds to pass as <Dial timeLimit>, or undefined for no limit.
+export function resolveMaxCallMinutes(settings: AppSettings): number | undefined {
+  const minutes = settings.maxCallMinutes ?? DEFAULT_MAX_CALL_MINUTES;
+  return minutes > 0 ? minutes * 60 : undefined;
 }
 
 const DEFAULT_SETTINGS: AppSettings = { bankDetails: '', updatedAt: 0 };

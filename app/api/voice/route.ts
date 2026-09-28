@@ -6,7 +6,7 @@ import {
   didLogicNumberFromDomain,
   didLogicSipCredsFromDomain,
 } from '@/lib/twilio';
-import { getAppSettings } from '@/lib/settingsStore';
+import { getAppSettings, resolveMaxCallMinutes } from '@/lib/settingsStore';
 import { isSuspended } from '@/lib/userStatus';
 
 // Twilio calls this route when an outbound call is initiated from the client
@@ -70,8 +70,7 @@ export async function POST(request: Request) {
       // than N minutes" — enforced by Twilio itself, not polled here.
       let timeLimit: number | undefined;
       try {
-        const settings = await getAppSettings();
-        if (settings.maxCallMinutes) timeLimit = settings.maxCallMinutes * 60;
+        timeLimit = resolveMaxCallMinutes(await getAppSettings());
       } catch (e) {
         console.warn('[/api/voice] call-limit lookup skipped:', e);
       }

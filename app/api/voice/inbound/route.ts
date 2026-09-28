@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import twilio from 'twilio';
 import { twilioClient } from '@/lib/twilio';
 import { findDidwwOwnerByNumber } from '@/lib/didww';
-import { getAppSettings } from '@/lib/settingsStore';
+import { getAppSettings, resolveMaxCallMinutes } from '@/lib/settingsStore';
 
 // POST /api/voice/inbound
 // Twilio hits this when someone calls a user's WDF Call number. We route the
@@ -43,8 +43,7 @@ export async function POST(request: Request) {
       // than N minutes" — enforced by Twilio itself, not polled here.
       let timeLimit: number | undefined;
       try {
-        const settings = await getAppSettings();
-        if (settings.maxCallMinutes) timeLimit = settings.maxCallMinutes * 60;
+        timeLimit = resolveMaxCallMinutes(await getAppSettings());
       } catch (e) {
         console.warn('[/api/voice/inbound] call-limit lookup skipped:', e);
       }

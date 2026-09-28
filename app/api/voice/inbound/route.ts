@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import twilio from 'twilio';
 import { twilioClient } from '@/lib/twilio';
 import { findDidwwOwnerByNumber } from '@/lib/didww';
+import { getAppSettings } from '@/lib/settingsStore';
 
 // POST /api/voice/inbound
 // Twilio hits this when someone calls a user's WDF Call number. We route the
@@ -38,7 +39,20 @@ export async function POST(request: Request) {
     }
 
     if (owner) {
-      const dial = twiml.dial({ answerOnBridge: true, timeout: 30 });
+      // Admin-configurable auto-hangup — "stop it once they've spent more
+      // than N minutes" — enforced by Twilio itself, not polled here.
+      let timeLimit: number | undefined;
+      try {
+        const settings = await getAppSettings();
+        if (settings.maxCallMinutes) timeLimit = settings.maxCallMinutes * 60;
+      } catch (e) {
+        console.warn('[/api/voice/inbound] call-limit lookup skipped:', e);
+      }
+      const dial = twiml.dial({
+        answerOnBridge: true,
+        timeout: 30,
+        ...(timeLimit ? { timeLimit } : {}),
+      });
       dial.client(owner);
     } else {
       twiml.say('This number is not currently in service.');

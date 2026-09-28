@@ -23,6 +23,11 @@ const SCOPES = ['https://www.googleapis.com/auth/identitytoolkit'];
 
 export interface AppSettings {
   bankDetails: string;
+  // Auto-hangs up any call past this many minutes (Twilio's own <Dial
+  // timeLimit>, not a monitoring loop this backend has to run) — the "stop
+  // it costing money past N minutes" control. Admin-editable; 0/undefined
+  // means no limit.
+  maxCallMinutes?: number;
   updatedAt: number;
 }
 

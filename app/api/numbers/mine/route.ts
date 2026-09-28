@@ -6,18 +6,21 @@ import {
 } from '@/lib/twilio';
 import { findDidwwNumberByOwner } from '@/lib/didww';
 import { getClaim } from '@/lib/claimStore';
+import { isSuspended } from '@/lib/userStatus';
 
 // POST /api/numbers/mine
 // Body: { identity: string }
 // Returns: { phoneNumber: string | null, status: "approved"|"pending"|"rejected"|"failed"|"none",
-//            requestedNumber?: string, error?: string }
+//            requestedNumber?: string, error?: string, suspended: boolean }
 //
 // Checks native Twilio numbers first (Mobile), then a DIDLogic-bridged
 // number, then a DIDWW-bridged number — a user has at most one number
 // across all three. If none of those own a number yet, falls back to their
 // claim-request status (pending manual payment approval — see
 // lib/claimStore.ts) so the app can show "waiting for approval" instead of
-// a bare "no number".
+// a bare "no number". `suspended` is independent of all of that — an admin
+// kill switch that blocks calling even with an approved number (see
+// lib/userStatus.ts) — so it's attached to every branch below.
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -30,11 +33,18 @@ export async function POST(request: Request) {
       );
     }
 
+    let suspended = false;
+    try {
+      suspended = await isSuspended(identity);
+    } catch (e) {
+      console.warn('[/api/numbers/mine] suspension lookup skipped:', e);
+    }
+
     // Native Twilio is the primary source and stays strict — if this call
     // fails, that's a real problem worth surfacing.
     const existing = await findNumberByIdentity(identity);
     if (existing) {
-      return NextResponse.json({ phoneNumber: existing.phoneNumber, status: 'approved' });
+      return NextResponse.json({ phoneNumber: existing.phoneNumber, status: 'approved', suspended });
     }
 
     // DIDLogic and DIDWW are optional side-providers, each with its own
@@ -48,7 +58,7 @@ export async function POST(request: Request) {
         ? didLogicNumberFromDomain(domain.domainName)
         : null;
       if (didLogicNumber) {
-        return NextResponse.json({ phoneNumber: `+${didLogicNumber}`, status: 'approved' });
+        return NextResponse.json({ phoneNumber: `+${didLogicNumber}`, status: 'approved', suspended });
       }
     } catch (e) {
       console.warn('[/api/numbers/mine] DIDLogic lookup skipped:', e);
@@ -57,7 +67,7 @@ export async function POST(request: Request) {
     try {
       const didwwNumber = await findDidwwNumberByOwner(identity);
       if (didwwNumber) {
-        return NextResponse.json({ phoneNumber: didwwNumber, status: 'approved' });
+        return NextResponse.json({ phoneNumber: didwwNumber, status: 'approved', suspended });
       }
     } catch (e) {
       console.warn('[/api/numbers/mine] DIDWW lookup skipped:', e);
@@ -72,6 +82,7 @@ export async function POST(request: Request) {
           status: claim.status, // 'pending' | 'seen' | 'processing' | 'rejected' | 'failed'
           requestedNumber: claim.phoneNumber,
           hasProof: !!claim.proofPath,
+          suspended,
           ...(claim.error ? { error: claim.error } : {}),
           ...(claim.rejectReason ? { rejectReason: claim.rejectReason } : {}),
         });
@@ -80,7 +91,7 @@ export async function POST(request: Request) {
       console.warn('[/api/numbers/mine] claim lookup skipped:', e);
     }
 
-    return NextResponse.json({ phoneNumber: null, status: 'none' });
+    return NextResponse.json({ phoneNumber: null, status: 'none', suspended });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[/api/numbers/mine] Error:', message);

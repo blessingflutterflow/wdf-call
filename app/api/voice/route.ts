@@ -6,6 +6,8 @@ import {
   didLogicNumberFromDomain,
   didLogicSipCredsFromDomain,
 } from '@/lib/twilio';
+import { getAppSettings } from '@/lib/settingsStore';
+import { isSuspended } from '@/lib/userStatus';
 
 // Twilio calls this route when an outbound call is initiated from the client
 export async function POST(request: Request) {
@@ -49,8 +51,35 @@ export async function POST(request: Request) {
 
     const twiml = new twilio.twiml.VoiceResponse();
 
-    if (To) {
-      const dial = twiml.dial({ callerId, answerOnBridge: true });
+    // Admin kill switch — the app's own dial pad already refuses to place
+    // this call, but that's a UI gate; this is the real enforcement so it
+    // can't be bypassed by an older app build or a direct API call.
+    let blocked = false;
+    if (identity) {
+      try {
+        blocked = await isSuspended(identity);
+      } catch (e) {
+        console.warn('[/api/voice] suspension lookup skipped:', e);
+      }
+    }
+
+    if (blocked) {
+      twiml.say('Your account is suspended. Please buy airtime to continue.');
+    } else if (To) {
+      // Admin-configurable auto-hangup — "stop it once they've spent more
+      // than N minutes" — enforced by Twilio itself, not polled here.
+      let timeLimit: number | undefined;
+      try {
+        const settings = await getAppSettings();
+        if (settings.maxCallMinutes) timeLimit = settings.maxCallMinutes * 60;
+      } catch (e) {
+        console.warn('[/api/voice] call-limit lookup skipped:', e);
+      }
+      const dial = twiml.dial({
+        callerId,
+        answerOnBridge: true,
+        ...(timeLimit ? { timeLimit } : {}),
+      });
       // If the "To" is a client identity (not a phone number), use <Client>
       if (To.startsWith('client:')) {
         dial.client(To.replace('client:', ''));

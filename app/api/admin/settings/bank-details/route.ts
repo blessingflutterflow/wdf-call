@@ -18,7 +18,10 @@ export async function POST(request: Request) {
     if (typeof bankDetails !== 'string') {
       return NextResponse.json({ error: 'bankDetails is required' }, { status: 400 });
     }
-    await setAppSettings({ bankDetails, updatedAt: Date.now() });
+    // Merge, don't replace — setAppSettings overwrites the whole blob, and
+    // there are other fields (maxCallMinutes) living in it now.
+    const current = await getAppSettings();
+    await setAppSettings({ ...current, bankDetails, updatedAt: Date.now() });
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';

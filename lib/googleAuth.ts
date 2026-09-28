@@ -7,7 +7,7 @@ interface ServiceAccount {
 }
 
 let cachedServiceAccount: ServiceAccount | null = null;
-let cachedToken: { token: string; expiresAt: number } | null = null;
+const tokenCache = new Map<string, { token: string; expiresAt: number }>();
 
 function serviceAccount(): ServiceAccount {
   if (cachedServiceAccount) return cachedServiceAccount;
@@ -42,9 +42,11 @@ function base64url(input: string): string {
  * using the token this returns.
  */
 export async function getGoogleAccessToken(scopes: string[]): Promise<string> {
+  const cacheKey = [...scopes].sort().join(' ');
   const now = Math.floor(Date.now() / 1000);
-  if (cachedToken && cachedToken.expiresAt > now + 60) {
-    return cachedToken.token;
+  const cached = tokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > now + 60) {
+    return cached.token;
   }
 
   const sa = serviceAccount();
@@ -77,6 +79,6 @@ export async function getGoogleAccessToken(scopes: string[]): Promise<string> {
     throw new Error(`Google token exchange failed (${res.status}): ${await res.text()}`);
   }
   const data = (await res.json()) as { access_token: string; expires_in: number };
-  cachedToken = { token: data.access_token, expiresAt: now + data.expires_in };
+  tokenCache.set(cacheKey, { token: data.access_token, expiresAt: now + data.expires_in });
   return data.access_token;
 }

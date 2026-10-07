@@ -47,6 +47,18 @@ export function twilioAdminClient() {
   );
 }
 
+/** Downloads a completed call recording's audio (mp3) from Twilio. */
+export async function downloadRecordingAudio(recordingUrl: string): Promise<Buffer> {
+  const sid = process.env.TWILIO_ACCOUNT_SID!;
+  const token = process.env.TWILIO_AUTH_TOKEN!;
+  const auth = 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64');
+  const res = await fetch(`${recordingUrl}.mp3`, { headers: { Authorization: auth } });
+  if (!res.ok) {
+    throw new Error(`Recording download failed (${res.status}): ${await res.text()}`);
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
 /**
  * DIDLogic numbers aren't Twilio IncomingPhoneNumbers (no friendlyName to tag),
  * so each one gets its OWN dedicated Twilio SIP Domain instead — the domain's

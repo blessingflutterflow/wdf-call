@@ -19,7 +19,6 @@ export interface CallLogRecord {
   recordingSid?: string;
   recordingUrl?: string;
   recordingDuration?: number;
-  transcriptionId?: string;
   transcript?: string;
   summary?: string;
   status: CallLogStatus;
@@ -106,47 +105,4 @@ export async function listCallLogs(identity: string): Promise<CallLogRecord[]> {
 
 export async function listAllCallLogs(): Promise<CallLogRecord[]> {
   return fetchObjectsByPrefix('calls/');
-}
-
-// The transcriptionStatusCallback webhook is configured once on the shared
-// Configuration (see lib/twilioTranscription.ts), not per-request, so its
-// payload has no room for us to pass identity/callSid through like the
-// recording-complete callback does via query string. This pointer, written
-// right after submitting a recording for transcription, is how
-// transcription-complete finds its way back to the right call log.
-interface TranscriptionPointer {
-  identity: string;
-  callSid: string;
-}
-
-function pointerPath(transcriptionId: string): string {
-  return `calls/_transcriptionIndex/${transcriptionId}.json`;
-}
-
-export async function saveTranscriptionPointer(
-  transcriptionId: string,
-  pointer: TranscriptionPointer
-): Promise<void> {
-  const res = await storageFetch(
-    `/upload/storage/v1/b/${BUCKET}/o?uploadType=media&name=${encodeURIComponent(
-      pointerPath(transcriptionId)
-    )}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pointer),
-    }
-  );
-  if (!res.ok) throw new Error(`Transcription pointer save failed (${res.status}): ${await res.text()}`);
-}
-
-export async function getTranscriptionPointer(
-  transcriptionId: string
-): Promise<TranscriptionPointer | null> {
-  const res = await storageFetch(
-    `/storage/v1/b/${BUCKET}/o/${encodeURIComponent(pointerPath(transcriptionId))}?alt=media`
-  );
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`Transcription pointer read failed (${res.status}): ${await res.text()}`);
-  return res.json();
 }

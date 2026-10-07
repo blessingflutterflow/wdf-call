@@ -1,25 +1,57 @@
-// GLM-5.3 via OpenRouter — summarizes call transcripts. Chosen for low
-// per-token cost; it's text-only, so this is only ever called with a
-// transcript already in hand (see lib/twilioTranscription.ts for how that
-// transcript is produced).
+// OpenRouter — transcribes (Whisper) and summarizes (GLM-5.3) call
+// recordings. Twilio's own Batch Transcription API needs the account to
+// accept their AI/ML features addendum first (blocked — see git history),
+// so transcription happens here instead: plain Twilio call recording (no
+// addendum needed) -> download the audio -> Whisper via OpenRouter ->
+// GLM-5.3 via OpenRouter for the summary. Same OpenRouter key for both
+// steps, no extra vendor.
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
-const MODEL = 'z-ai/glm-5.3';
+const SUMMARY_MODEL = 'z-ai/glm-5.3';
+const TRANSCRIBE_MODEL = 'openai/whisper-1';
 
-export async function summarizeCallTranscript(transcript: string): Promise<string> {
+function openrouterApiKey(): string {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error('OPENROUTER_API_KEY is not configured');
+  return apiKey;
+}
 
+/** Transcribes a call recording. audioBytes is the raw file (e.g. mp3) from Twilio. */
+export async function transcribeAudio(audioBytes: Buffer, filename: string): Promise<string> {
+  const form = new FormData();
+  form.append('model', TRANSCRIBE_MODEL);
+  form.append('file', new Blob([new Uint8Array(audioBytes)]), filename);
+
+  const res = await fetch(`${OPENROUTER_BASE}/audio/transcriptions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${openrouterApiKey()}`,
+      'HTTP-Referer': 'https://wdf-call.vercel.app',
+      'X-Title': 'Nosh Call Summaries',
+    },
+    body: form,
+  });
+
+  if (!res.ok) {
+    throw new Error(`OpenRouter transcription failed (${res.status}): ${await res.text()}`);
+  }
+  const data = (await res.json()) as { text?: string };
+  const text = data.text?.trim();
+  if (!text) throw new Error('OpenRouter returned an empty transcript');
+  return text;
+}
+
+export async function summarizeCallTranscript(transcript: string): Promise<string> {
   const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${openrouterApiKey()}`,
       'Content-Type': 'application/json',
       'HTTP-Referer': 'https://wdf-call.vercel.app',
       'X-Title': 'Nosh Call Summaries',
     },
     body: JSON.stringify({
-      model: MODEL,
+      model: SUMMARY_MODEL,
       messages: [
         {
           role: 'system',

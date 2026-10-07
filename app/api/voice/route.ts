@@ -74,19 +74,14 @@ export async function POST(request: Request) {
       } catch (e) {
         console.warn('[/api/voice] call-limit lookup skipped:', e);
       }
-      const origin = process.env.PUBLIC_BASE_URL || new URL(request.url).origin;
-      const recordingCallback = `${origin}/api/voice/recording-complete?identity=${encodeURIComponent(
-        identity
-      )}&direction=outbound&otherParty=${encodeURIComponent(To)}`;
       const dial = twiml.dial({
         callerId,
         answerOnBridge: true,
         ...(timeLimit ? { timeLimit } : {}),
-        // AI call-summary feature — see lib/callLogStore.ts and
-        // app/api/voice/recording-complete for what happens with this.
-        record: 'record-from-answer-dual',
-        recordingStatusCallback: recordingCallback,
-        recordingStatusCallbackEvent: ['completed'],
+        // Recording/transcription (AI call-summary feature) is on hold — the
+        // Twilio account needs the AI/ML features addendum accepted first.
+        // See lib/callLogStore.ts, app/api/voice/recording-complete, and
+        // app/api/voice/transcription-complete for the dormant pipeline.
       });
       // If the "To" is a client identity (not a phone number), use <Client>
       if (To.startsWith('client:')) {

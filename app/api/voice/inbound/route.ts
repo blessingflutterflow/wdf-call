@@ -24,7 +24,6 @@ export async function POST(request: Request) {
 
     const formData = await request.formData().catch(() => null);
     const to = (formData?.get('To') as string) || '';
-    const from = (formData?.get('From') as string) || '';
 
     if (!owner && to) {
       const client = twilioClient();
@@ -48,19 +47,14 @@ export async function POST(request: Request) {
       } catch (e) {
         console.warn('[/api/voice/inbound] call-limit lookup skipped:', e);
       }
-      const origin = process.env.PUBLIC_BASE_URL || url.origin;
-      const recordingCallback = `${origin}/api/voice/recording-complete?identity=${encodeURIComponent(
-        owner
-      )}&direction=inbound&otherParty=${encodeURIComponent(from)}`;
       const dial = twiml.dial({
         answerOnBridge: true,
         timeout: 30,
         ...(timeLimit ? { timeLimit } : {}),
-        // AI call-summary feature — see lib/callLogStore.ts and
-        // app/api/voice/recording-complete for what happens with this.
-        record: 'record-from-answer-dual',
-        recordingStatusCallback: recordingCallback,
-        recordingStatusCallbackEvent: ['completed'],
+        // Recording/transcription (AI call-summary feature) is on hold — the
+        // Twilio account needs the AI/ML features addendum accepted first.
+        // See lib/callLogStore.ts, app/api/voice/recording-complete, and
+        // app/api/voice/transcription-complete for the dormant pipeline.
       });
       dial.client(owner);
     } else {

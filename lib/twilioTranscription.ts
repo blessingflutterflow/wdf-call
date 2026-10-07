@@ -53,7 +53,7 @@ export async function createTranscriptionConfig(callbackUrl: string) {
       configuration: {
         configurationType: 'Transcription',
         transcriptionEngine: 'twilio_managed',
-        languageCode: 'en-US',
+        language: 'en-US',
         transcriptionStatusCallback: { url: callbackUrl, method: 'POST' },
         participantDefaults: [
           { audioChannelIndex: 1, type: 'CUSTOMER' },
